@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<title>AVICAR</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<link rel="apple-touch-icon" href="avicar.png">
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<style>
+
+html {
+  color: white;
+  font: 14px system-ui, "Helvetica Neue", sans-serif;
+}
+
+html, body, #v {
+  margin: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: black;
+  overflow: hidden;
+}
+
+#v {
+  object-fit: cover;
+}
+
+#touchpad {
+  position: absolute;
+  top: 25vh;
+  left: 10vw;
+  width: 50vh;
+  height: 50vh;
+  border-radius: 25vh;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+#trim {
+  position: absolute;
+  top: 1em;
+  right: 1em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+#trim button {
+  font: inherit;
+  font-size: 1.4em;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.5);
+  border: none;
+  border-radius: 0.1em;
+  width: 2em;
+  height: 1.5em;
+  display: block;
+  margin: 0 0.1em;
+  padding: 0;
+}
+
+@media (orientation: portrait) {
+  #touchpad {
+    top: auto;
+    bottom: 10vh;
+    left: 25vw;
+    width: 10vw; //50vw is the width default
+    height: 10vh;
+    border-radius: 25vw;
+    background: rgba(255, 255, 255, 0.5);
+  }
+}
+
+#messageEl {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font: 1.4em monospace;
+  margin: 0.5em;
+}
+      
+
+</style>
+<video id=v muted autoplay playsinline></video>
+<div id=touchpad></div>
+<div id=trim>
+  STEERING TRIM
+  <div style="display: flex; align-items: center; margin-top: 0.5em; margin-bottom: 1em;">
+    <button id=trimDown>&ndash;</button>
+    <div id=trimValue style="width: 2em; text-align: center;">0</div>
+    <button id=trimUp>+</button>
+  </div>
+  MAX SPEED
+  <input type=range min=0 max=1 step=0.01 id=maxSpeedEl>
+</div>
+<div id=messageEl></div>
+<script>
+
+var rtcConfig = {
+  "iceServers": [
+    {
+      "urls": [
+        "stun:eu-turn2.xirsys.com"
+      ]
+    },
+    {
+      "username": "HsUicabP7fG2RiYPtkkEp8HUacCdyQCW-xXu0sj3r9BG7tbKnyTf5sD4w9VRMQt_AAAAAF7ETPBib3phbQ==",
+      "credential": "295de6f0-9a16-11ea-b71a-0242ac140004",
+      "urls": [
+        "turn:eu-turn2.xirsys.com:80?transport=udp",
+        "turn:eu-turn2.xirsys.com:3478?transport=udp",
+        "turn:eu-turn2.xirsys.com:80?transport=tcp",
+        "turn:eu-turn2.xirsys.com:3478?transport=tcp",
+        "turns:eu-turn2.xirsys.com:443?transport=tcp",
+        "turns:eu-turn2.xirsys.com:5349?transport=tcp"
+      ]
+    }
+  ]
+};
+var pc;
+var datachannel;
+
+var protocol = location.protocol === "https:" ? "wss:" : "ws:";
+var url = protocol + '//' + location.host + '/webrtc';
+
+function connect() {
+  var ws = new WebSocket(url);
+  ws.onopen = function() {
+    ws.send(JSON.stringify({
+      what: "call",
+      options: {
+          // If forced, the hardware codec depends on the arch.
+          // (e.g. it's H264 on the Raspberry Pi)
+          // Make sure the browser supports the codec too.
+          // Note: iOS does not.
+          // force_hw_vcodec: true,
+          vformat: 30, /* 30=640x480, 30 fps */
+          trickle_ice: true
+      }
+    }));
+    pc = new RTCPeerConnection(rtcConfig);
+    pc.onicecandidate = function(e) {
+      if (!e.candidate)
+        return;
+      ws.send(JSON.stringify({
+        what: "addIceCandidate",
+        data: JSON.stringify(e.candidate)
+      }));
+    };
+    pc.ondatachannel = function(e) {
+      datachannel = e.channel;
+      console.log('got datachannel', datachannel);
+    };
+    pc.ontrack = function(e) {
+      console.log(e);
+      v.srcObject = e.streams[0];
+      v.load();
+    };
+  };
+  ws.onclose = function() {
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = function(e) {
+    var msg = JSON.parse(e.data);
+    var what = msg.what;
+    var data = msg.data;
+    switch (what) {
+      case "offer":
+        messageEl.display = 'none';
+        messageEl.textContent = '';
+        pc.setRemoteDescription(JSON.parse(data))
+          .then(function() {
+            pc.createAnswer({
+              offerToReceiveAudio: false,
+              offerToReceiveVideo: true,
+            }).then(function(answer) {
+              pc.setLocalDescription(answer);
+              ws.send(JSON.stringify({
+                what: "answer",
+                data: JSON.stringify(answer)
+              }));
+            })
+            .catch(function (error) {
+              console.log("failed to create answer: " + error);
+            });
+          });
+        break;
+      case "iceCandidate":
+        pc.addIceCandidate(data ? JSON.parse(data) : null);
+        break;
+      case "message":
+        messageEl.display = '';
+        messageEl.textContent = data;
+        break;
+      default:
+        console.log('unknown message:', what, data);
+    }
+  };
+}
+
+connect();
+
+var maxSpeed = +localStorage.maxSpeed || 1;
+var state = { speed: 0, steer: 0, trim: +localStorage.steeringTrim || 0 };
+
+function set(speed, steer) {
+  state.speed = Math.max(-maxSpeed, Math.min(maxSpeed, speed));
+  state.steer = Math.max(-0.5, Math.min(0.5, steer));
+  send();
+}
+function send() {
+  if (!datachannel)
+    return;
+  console.log(state);
+  datachannel.send(JSON.stringify(state));
+}
+
+var sendInterval;
+
+touchpad.ontouchstart = function(touchStartEvent) {
+  touchStartEvent.preventDefault();
+  sendInterval = setInterval(send, 100);
+  touchpad.ontouchmove = function(e) {
+    e.preventDefault();
+    var xDelta = (touchStartEvent.touches[0].screenX - e.touches[0].screenX) / window.innerWidth;
+    var yDelta = (touchStartEvent.touches[0].screenY - e.touches[0].screenY) / window.innerHeight;
+    set(yDelta * 2 * maxSpeed, -xDelta * 2);
+  }
+};
+
+touchpad.ontouchend = function(e) {
+  touchpad.ontouchmove = null;
+  clearInterval(sendInterval);
+  set(0, 0);
+};
+
+var keysDown = {};
+
+function keysChanged() {
+  var speed = 0;
+  var steer = 0;
+  if (keysDown[37])
+    steer -= 1;
+  if (keysDown[38])
+    speed += 1;
+  if (keysDown[39])
+    steer += 1;
+  if (keysDown[40])
+    speed -= 1;
+  set(speed, steer);
+}
+
+window.addEventListener('keydown', function (e) {
+  if (e.keyCode < 37 || e.keyCode > 40)
+    return;
+  e.preventDefault();
+  keysDown[e.keyCode] = true;
+  keysChanged();
+  sendInterval = setInterval(send, 100);
+});
+
+window.addEventListener('keyup', function (e) {
+  e.preventDefault();
+  keysDown[e.keyCode] = false;
+  keysChanged();
+  clearInterval(sendInterval);
+});
+
+function updateTrim() {
+  trimValue.textContent = state.trim;
+  localStorage.steeringTrim = state.trim;
+}
+
+function updateMaxSpeed() {
+  maxSpeedEl.value = maxSpeed;
+}
+
+trimDown.addEventListener('click', e => {
+  e.preventDefault();
+  state.trim--;
+  updateTrim();
+  send();
+});
+
+trimUp.addEventListener('click', e => {
+  e.preventDefault();
+  state.trim++;
+  updateTrim();
+  send();
+});
+
+maxSpeedEl.addEventListener('input', e => {
+  localStorage.maxSpeed = maxSpeed = maxSpeedEl.valueAsNumber;
+});
+
+updateTrim();
+updateMaxSpeed();
+
+</script>
